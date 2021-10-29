@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 
 def sha3_import():
     for module in ["hashlib", "sha3"]:
@@ -56,7 +57,7 @@ def fossil_decompress(buffer, uncompressed = False):
 
 # Returns the name of an article with certain escaped characters 
 def sanitizer(name):
-    return name.replace(" ", "\\s").encode()
+    return name.replace(str(" "), str("\\s"))
 
 # Recompression
 def fossil_compress(artifact, is_delta = False):
@@ -64,7 +65,7 @@ def fossil_compress(artifact, is_delta = False):
         metadata = width_pattern.sub(b"\nW %i\n" % len(artifact["content"]), artifact["metadata"], 1)
         dehased_result = metadata + artifact["content"] + b"\n"
         content_md5 = md5(dehased_result).hexdigest()
-        result = dehased_result + b"Z %s\n" % content_md5.encode()
+        result = dehased_result + b"Z %s\n" % content_md5
     else: result = artifact
     packed= {}
     packed["size"] = len(result)
@@ -82,12 +83,12 @@ def article_renamer(old_name, new_name):
     SELECT size, uuid, content FROM tagxref
      INNER JOIN blob ON blob.rid=tagxref.rid
      WHERE tagid=(SELECT tagid FROM tag
-      WHERE tagname='wiki-%s')
+      WHERE tagname=?)
      ORDER BY mtime
     """
     # Get the article and its intermediate editions from its first version to
     # the most recent 
-    artifacts_data = cur_repo.execute(query % old_name).fetchall()
+    artifacts_data = cur_repo.execute(query, [str('wiki-')+old_name]).fetchall()
     if len(artifacts_data) == 0:
         return None
     # Original hash of the previous delta
@@ -101,14 +102,16 @@ def article_renamer(old_name, new_name):
         command_result = os.system("%s artifact %s -R %s > %s" % (fossil_bin, artifact[1], reponame, artifact[1]))
         hash_list.append(artifact[1])
         article_edit = open(artifact[1], "rb").read()
-        article_edit = article_edit.replace(b"\nL %s\n" % sanitizer(old_name), b"\nL %s\n" % sanitizer(new_name))
+        meta_old_name = b"\nL %s\n" % buffer(sanitizer(old_name))
+        meta_new_name = b"\nL %s\n" % buffer(sanitizer(new_name))
+        article_edit = article_edit.replace(meta_old_name, meta_new_name)
         # Update the SHA3 hash of the previous edition
         if artifact != artifacts_data[0]:
             prev_artifact_hash = str(artifacts_data[artifacts_data.index(artifact) - 1][1])
             prev_updated = fossil_decompress(open(prev_artifact_hash, "rb").read(), True)
-            article_edit = article_edit.replace(prev_artifact_hash.encode(), fossil_compress(prev_updated)["id"].encode(), 1)
+            article_edit = article_edit.replace(prev_artifact_hash, fossil_compress(prev_updated)["id"], 1)
         recompressed = fossil_compress(fossil_decompress(article_edit, True))
-        article_edit = md5_pattern.sub(b"\nZ %s\n" % recompressed["md5"].encode(), article_edit, 1)
+        article_edit = md5_pattern.sub(b"\nZ %s\n" % recompressed["md5"], article_edit, 1)
         edited_artifact = open(artifact[1], "wb")
         edited_artifact.write(article_edit)
         edited_artifact.close()
@@ -125,8 +128,8 @@ def article_renamer(old_name, new_name):
             raw_artifact = fossil_decompress(article_data, True)
         else:
             raw_artifact = fossil_decompress(artifact[2])
-            raw_artifact["metadata"] = raw_artifact["metadata"].replace(b"\nL %s\n" % sanitizer(old_name), b"\nL %s\n" % sanitizer(new_name))
-            raw_artifact["metadata"] = raw_artifact["metadata"].replace(last_hash_delta.encode(), last_new_hash_delta)
+            raw_artifact["metadata"] = raw_artifact["metadata"].replace(meta_old_name, meta_new_name)
+            raw_artifact["metadata"] = raw_artifact["metadata"].replace(last_hash_delta, last_new_hash_delta)
         artifact_mod = fossil_compress(raw_artifact)
         if artifact != artifacts_data[-1]:
             # Replace the md5 hash of the original article
@@ -138,15 +141,15 @@ def article_renamer(old_name, new_name):
         # Update artifact in the repo database
         update_statement = "UPDATE blob SET uuid = ?, size = ?, content = ? WHERE uuid = ?"
         cur_repo.execute(update_statement, [artifact_mod["id"], artifact_mod["size"], artifact_mod["blob"], artifact[1]])
-        last_new_hash_delta = bytearray(artifact_mod["id"].encode())
+        last_new_hash_delta = bytearray(artifact_mod["id"])
         last_hash_delta = str(artifact[1])
         print("Artifact %s updated to %s" % (artifact[1][:10], artifact_mod["id"][:10]))
     # Update everything that points to the old article name
     cur_repo.execute("UPDATE attachment SET target=? WHERE target=?", [new_name, old_name])
-    cur_repo.execute("UPDATE event SET comment=':%s' WHERE comment=':%s'" % (new_name, old_name))
-    cur_repo.execute("UPDATE event SET comment='+%s' WHERE comment='+%s'" % (new_name, old_name))
-    cur_repo.execute("UPDATE event SET comment=replace(comment, '[%s]', '[%s]') WHERE comment like '%%[%s]%%'" % (old_name, new_name, old_name))
-    cur_repo.execute("UPDATE tag SET tagname='wiki-%s' WHERE tagname='wiki-%s'" % (new_name, old_name))
+    cur_repo.execute("UPDATE event SET comment=? WHERE comment=?", [str(":")+new_name, str(":")+old_name])
+    cur_repo.execute("UPDATE event SET comment=? WHERE comment=?", [str("+")+new_name, str("+")+old_name])
+    cur_repo.execute("UPDATE event SET comment=replace(comment, ?, ?) WHERE comment like ?", [str("[")+old_name+str("]"), str("[")+new_name+str("]"), str("[")+old_name+str("]")])
+    cur_repo.execute("UPDATE tag SET tagname=? WHERE tagname=?", [str('wiki-')+new_name, str('wiki-')+old_name])
     print("References updated")
     # Delete temporary files after finishing
     for sha_hash in hash_list: os.remove(sha_hash)
@@ -174,6 +177,7 @@ if __name__ == "__main__":
         exit(1)
     # Get SQL data query as dict
     #repodb.row_factory = sqlite3.Row
+    repodb.text_factory = str
     cur_repo = repodb.cursor()
     #print("|".join(sys.argv))
     result = article_renamer(original_name, new_name)
